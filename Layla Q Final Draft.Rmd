@@ -1,0 +1,73 @@
+---
+title: "NYC Public School Data"
+author: "Layla Quinones"
+date: '2022-05-05'
+output: pdf_document
+---
+
+```{r global-options, include=FALSE}
+#This hides everything so we can manually include things
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, results = FALSE)
+```
+
+# Abstract:
+
+- Use 250 words or less to summarize your problem, methodology, and major outcomes.
+
+# Key words:
+
+- Select a few key words (up to five) related to your work.
+
+# Introduction:
+
+- Describe the background and motivation of your problem.
+
+# Literature review:
+
+- Discuss how other researchers have addressed similar problems, what their achievements are, and what the advantage and drawbacks of each reviewed approach are. Explain how your investigation is similar or different to the state-of-the- art. Please cite the relevant papers where appropriate.
+
+# Methodology:
+
+- Discuss the key aspects of your problem, data set and regression model(s). Given that you are working on real-world data, explain at a high-level your exploratory data analysis, how you prepared the data for regression modeling, your process for building regression models, and your model selection.
+
+# Experimentation and Results: 
+
+```{r}
+library(dplyr)
+# Load data
+# Training
+rawOne <- read.csv("https://raw.githubusercontent.com/MsQCompSci/LQ621Final/main/2005_-_2020_Quality_Review_Ratings.csv", header = TRUE, stringsAsFactors = FALSE) %>% dplyr::select(BN, School_Year, Overall_Rating)
+
+rawTwo <- read.csv("https://raw.githubusercontent.com/MsQCompSci/LQ621Final/main/2005-2010_Graduation_Outcomes_-_School_Level.csv", header = TRUE, stringsAsFactors = FALSE)%>% dplyr::select(-Demographic, -School.Name)
+```
+```{r}
+rawOne
+
+```
+
+- DBN and year is relevent only when attaching the data together, other than that it is irrelevent
+- clean year data (take the Aug away) rawTwo
+- clean the year data (only year) & Keep only 2005 - 2010 rawOne
+- put the two dataframes together by school and by year
+- find some demographic data about the schools also
+
+- the regression model I would like to use is something that preditcts the rating of the school based on the given variables. I would like to see which variables contribute the most to the predictor. 
+
+-Describe the specifics of what you did (data exploration, data preparation, model building, model selection, model evaluation, etc.), and what you found out (statistical analyses, interpretation and discussion of the results, etc.).
+
+# Discussion and Conclusions:
+
+- Conclude your findings, limitations, and suggest areas for future work.
+
+# References:
+
+- Be sure to cite all references used in the report (APA format)
+
+- Graduation Outcomes Data - https://data.cityofnewyork.us/Education/2005-2010-Graduation-Outcomes-School-Level/vh2h-md7a
+
+- School Rating Data - https://data.cityofnewyork.us/Education/2005-2020-Quality-Review-Ratings/3wfy-sn5g
+
+# Appendices:
+
+    - Supplemental tables and/or figures.
+    - R statistical programming code.
