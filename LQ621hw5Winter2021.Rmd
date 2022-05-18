@@ -1,0 +1,1262 @@
+---
+title: "Data 621 Homework 5"
+author: "Layla Quinones"
+date: "2022-April"
+output: pdf_document
+---
+
+```{r global-options, include=FALSE}
+#This hides everything so we can manually include things
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, results = FALSE)
+```
+
+# Overview
+
+In this homework assignment, we explore, analyze and model a data set containing approximately 12,000 records representing commercially available wines. Each record has a target variable representing the number of cases purchased. Along with the target variable, there are fourteen predictor variables we will use to construct a count regression model. This model will seek to predict the number of cases that will be sold given certain properties of wine.
+
+Some things to keep in mind are:
+- The more sample cases purchased, the more likely is a wine to be sold at a high end restaurant.
+- Predict the number of wine cases ordered based upon the wine characteristics.
+- Sometimes, the fact that a variable is missing is actually predictive of the target. You can only use the variables given to you (or variables that you derive from the variables provided).
+
+
+## Libraries Used
+
+Various libraries were used to construct this model. Details of when and how they are used is outlined in in this write up. For your reference they have been provided in **[Code Appendix A]**
+
+```{r}
+# Libraries
+library(caret)
+library(tidyverse)
+library(ggplot2)
+library(MASS)
+library(psych)
+library(MASS)
+library(GGally)
+```
+
+# Data Exploration
+
+The data is stored on a GitHub repository and imported into this program using the built in `read.csv()` function. The initial low level inspection was executed using the built in function `glimpse()` and `summary()`. In order to go a step further and provide visuals of these summary statistics, histograms and boxplots of each variable were generated using the `ggplot` library as seen in the **[Code Appendix B]** and in the output below.
+
+```{r}
+# Load data
+# Training
+rawTrain <- read.csv("https://raw.githubusercontent.com/MsQCompSci/Data621Group4/main/HW5/wine-training-data.csv", header = TRUE, stringsAsFactors = FALSE) %>% dplyr::select(-"INDEX")
+
+#Testing data
+rawTest <- read.csv("https://raw.githubusercontent.com/MsQCompSci/Data621Group4/main/HW5/wine-evaluation-data.csv", header = TRUE, stringsAsFactors = FALSE) %>% dplyr::select(-"IN", -"TARGET")
+```
+
+```{r, results = TRUE}
+# Histogram dataframe
+tallDF <- rawTrain %>% 
+  gather(key = 'variable', value = 'value')
+# Histogram plots of each variable
+ggplot(tallDF) + 
+  geom_histogram(aes(x=value, y = ..density..), bins=30) + 
+  geom_density(aes(x=value), color='blue') +
+  facet_wrap(. ~variable, scales='free', ncol=4)
+```
+
+## Summary Statistics Findings
+
+After inspection there is a column indicating of the `INDEX` that there are 12,795 observations in the training data set, and 3,335 in the test set. We see that there are 14 variables we might be able to use in this project, and one column , the `INDEX`, we do not need for this project. We also see that there are a few columns that have NA values which will be handled in the **Missing Values** section with consideration that according to the nature of the data set, sometimes a missing variable is actually predictive of the target. We also see that there are a mixture of categorical and continuous columns which we will take a deeper look at.
+
+The histograms show that many features are generally centered around the mean (appear normally distributed). Taking a deeper look at feature plots with respect to the target, we might be able to combine variables or eliminate some redundant ones. We also see skewed distributions from the variables `AcidIndex` and `STARS`. Box plots confirmed these findings **[Code Appendix B]**. 
+
+Upon inspection of each column using the built in function `class()` with `lapply()` on all columns, we confirmed that the `TARGET` variable along with `LabelAppeal`, `AcidIndex` and `STARS` are all categorical, while the others seem continuous. **[Code Appendix C]**
+
+Due to the high variability of each variable as shown in the histagrams above we must pay close attention to how we impute `NA` values due to the possability of over-performing a model.
+
+Data exploration was continued by analyzing the relationship between each variable and the target variable. For categorical data, box plots were used using the `ggplot` package, and for continuous data scatter plots were used using the `faturePlot()` function from the `caret` library.
+
+```{r, results = TRUE}
+#put dataframe into long format
+catLONG <- rawTrain %>% 
+  dplyr::select(TARGET, STARS, LabelAppeal, AcidIndex) %>%
+  pivot_longer(cols = -TARGET, names_to="variable", values_to="value") %>%
+  arrange(variable, value)
+
+#plot
+catLONG %>% 
+  ggplot(mapping = aes(x = factor(value), y = TARGET)) +
+    geom_boxplot() + 
+    facet_wrap(.~variable, scales="free") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+```{r, results=TRUE}
+contDF <- rawTrain%>%
+  dplyr::select(-STARS, -LabelAppeal, -AcidIndex)
+
+featurePlot(contDF[,2:ncol(contDF)], contDF[,1], pch = 20)
+```
+
+## Target vs. Variables Findings
+
+At first glance, it is difficult to see any noticeable relationship between the target variable and predictor variables. It does appear that variables have similarities with eachother: both STARS and LabelAppeal have a positive relationship with the TARGET; many chemical features have at least some negative relationship with the TARGET - the lower these values are the higher the target variable.
+
+One issue that is clear here is that many variables contain missing data that may effect our model. There also was an issue of negative values for variables measuring concentrations; I have elected to assume that these variables have been normalized in some way (most likely via a log transformation) and will be treated as such.
+
+# Data Preperation
+
+## Missing Values
+
+Taking a deeper look into missing variables we can see from the below output that all variables are below 10% acceptable missing value threshold except for the `STARS` variable. The `STARS` variable will be handled differently from the others **[Code Appendix E]**
+
+```{r, results = TRUE}
+# Identify missing data by Feature and display percent
+missing <- colSums(rawTrain %>% sapply(is.na))
+missing_pct <- round(missing / nrow(rawTrain) * 100, 2)
+stack(sort(missing_pct, decreasing = TRUE))
+```
+
+Since the data in the `STARS` category contains 3359 (26.25 %) NA values, and is discrete, I have decided to create a new variable that captures this data. We can see that from the boxplot above, there is some relationship between the `TARGET` variable and the `NA` values in the `STARS` variable. As illustrated in **[Code Appendix E]**, an observation given `NA` was not rated and therefore would receive a 0.
+
+```{r}
+#create list with new column names based on original column
+for(i in 1:length(rawTrain[['STARS']])){
+  if(is.na(rawTrain[['STARS']][i])){
+    rawTrain[['STARS']][i]<-'0'
+  }
+}
+
+#needs to be numeric
+rawTrain$STARS <- as.numeric(rawTrain$STARS)
+
+```
+
+The rest of the missing data was imputed using the K-Nearest Neighbor algorithm in the `preProcess()` function from the `caret` package which also normalizes and scales all other variables as well.**[Code Appendix E]**
+
+```{r}
+# separate variables from target
+trainX <- rawTrain %>% dplyr::select(-TARGET)
+trainY <- rawTrain$TARGET
+
+catsV <- rawTrain %>%
+  dplyr::select(STARS, AcidIndex, LabelAppeal)
+
+
+
+#normalize numerical variables
+#create model for normalizing
+prepTrainModel <- preProcess(trainX, method = c("center","scale"))
+
+
+#make predictions for new centered/scaled numbers not categorical variables
+trainX <- predict(prepTrainModel, trainX)
+trainX["STARS"] <- as.factor(catsV$STARS)
+trainX["AcidIndex"] <- as.factor(catsV$AcidIndex)
+trainX["LabelAppeal"] <- as.factor(catsV$LabelAppeal)
+
+
+#impute them using knn
+#create model for imputing 
+prepTrainModel <- preProcess(trainX, method = c("knnImpute"))
+#make predictions for NA values
+trainX <- predict(prepTrainModel, trainX)
+```
+
+Changes from this preprocessing step by taking a look at the `NA` values that are present in the data set again (see below), and by comparing histograms before and after (see below for new histagrams). From the output below we can see that all variables have been imputed using the K-Nearest Neighbor algorithm, centered and scaled around 0. This helps take care of negative values and any bias that may have been present due to values that were not in the data set. In addition, it is important to note that we are assuming all categorical variables are numerical and ordinal, and we are also assuming that the wines that were NOT REVIEWED would have recieved a zero - since according to the data we see that the wines that were not reviewed did not get ordered, or got ordered in small amounts (`TARGET` variable). **Code Appendix E**
+
+```{r, results = TRUE}
+# Identify missing data by Feature and display percent - new
+missing <- colSums(trainX %>% sapply(is.na))
+missing_pct <- round(missing / nrow(rawTrain) * 100, 2)
+stack(sort(missing_pct, decreasing = TRUE))
+```
+
+
+```{r, results = TRUE}
+# Histogram dataframe - new
+tallDF <- trainX %>% 
+  dplyr::select(-STARS,-AcidIndex, -LabelAppeal)%>%
+  gather(key = 'variable', value = 'value')
+
+# Histogram plots of each variable (new)
+ggplot(tallDF) + 
+  geom_histogram(aes(x=value, y = ..density..), bins=30) + 
+  geom_density(aes(x=value), color='blue') +
+  facet_wrap(. ~variable, scales='free', ncol=4)
+```
+
+**Note, categorical variables were not centered or scaled.**
+
+## Correlation
+
+After data exploration I started to see some patterns between variables. To ensure there is no multicolineartites the `ggcor()` function from the `ggpplot2()` library was used and the heat map output below was produced **Code Appendix F**.
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4 }
+# Let's use a heat map to see the level of correlation of the numeric predictor variables.
+#correlation matrix for predictors
+ggcorr(trainX)
+```
+
+We can see that although there are some correlation between acid measuring variables, none were significant enough to lead to removing or consolidating variables, or feature engineering via adding or subtracting variables.
+
+# Building Models 
+
+Due to the nature of this problem - the target variable being a discrete counting variable, I decided to try out two separate models:
+
+- Poisson Model : used to model counting variables and identifies variables that have a statistically significant effect on the response variable (assumes the variance of variables are equal to the mean)
+- Negative Binomial: a version of the poisson regression model which is less restrictive with assumption that the variance is equal to the mean made by the Poisson model.
+
+First data was partitioned 80% for training and 20% for testing **Code Appendex G** . Then was modeled using bothe poisson and negative binomial algorithms and compared.
+
+```{r}
+# set the seed to make your partition reproducible
+set.seed(369)
+
+#get 80 percent of random indexes and separate
+trainIndex <- createDataPartition(trainY, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+#put x and y in same dataframe again
+train <- trainX
+train["TARGET"] <- trainY
+
+#separate
+train <- train[trainIndex, ]
+test <- train[-trainIndex, ]
+```
+
+## Model 1: Poisson
+
+Below is the outputs associated with the first model - which was a Poisson model with all preprocessed variables included. The error was calculated using the `defaultSummary()` function in the `caret` package, and the variable importance was calculated using `varImp`  and plotted using `ggplot` for the first poisson model. Residual plots were not random (or with even spread), so the most important variables as listed below were used in a 2nd poisson model. **Code Appendix G**
+
+```{r, results = TRUE}
+#Model One
+poiss1 <- glm(TARGET ~ .,
+              data=train,
+              family="poisson")
+#get summary of model
+summary(poiss1)
+
+#for residuals
+plot(poiss1)
+```
+
+```{r}
+#separate variables and target
+trainX <- train %>% dplyr::select(-TARGET)
+trainY <- train %>% dplyr::select(TARGET)
+
+# Evaluate Model 1 with train data
+predY1train <- predict(poiss1, newdata=trainX)
+modelResultstrain1 <- data.frame(obs = trainY, pred=predY1train)
+colnames(modelResultstrain1) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain1 <- defaultSummary(modelResultstrain1)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain1
+
+#evaluate model 1 using test data
+testX <- test %>% dplyr::select(-TARGET)
+testY <- test %>% dplyr::select(TARGET)
+
+# Evaluate Model 1 with train data
+predYtest1 <- predict(poiss1, newdata=testX)
+modelResultsTest1 <- data.frame(obs = testY, pred=predYtest1)
+colnames(modelResultsTest1) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest1 <- defaultSummary(modelResultsTest1)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest1
+```
+
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(poiss1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot',
+         x = "Parameter",
+         y = "Relative Importance - Poisson 1")
+```
+
+### Comments on this model
+
+The residuals for this model is not homoscedastic and therefore we should probably change some pre processing steps to ensure residuals are more random. This is a trend that we will see in the rest of the models below. Important variables were identified from the bar chart above with variable importantce and used in the next model. We can see from the model output, based on model ceofficients that:
+- `STARS` has a strong positive affect on this model and should be included
+- `VolitileAcidity` has a strong negative affect on this model and should be included
+- `FreesulfurDioxide` has some positive affect on the model and should be included
+- `TotalSulfurDioxide` has some positive affect on the model (med strength)
+- `Sulfates` has some negative affect on the model and should be included
+- `Acid Index` has some negative affect on the model and should be included 
+- `Chlorides` although chlorides have some affect on the model (little significance indicated by the p value) and should be included in the model
+- `LabelAppeal` has a very strong positive affect on the model and should be included
+
+## Model 2: Poisson (most important variables)
+
+The following variables as identified by the first model were included in the second poisson model:
+`LabelAppeal, AcidIndex, STARS, VolatileAcidity, Chlorides, FreeSulfurDioxide, TotalSulfurDioxide, Sulphates`.
+
+Below is the outputs associated with the second model - which was a Poisson model some preprocessed variables included (identified above). The error was calculated using the `defaultSummary()` function in the `caret` package, and the variable importance was calculated using `varImp`  and plotted using `ggplot` for the first poisson model. Residual plots were not random (or with even spread), so the most important variables as listed below were used in a 2nd poisson model. **Code Appendix H**
+
+```{r,results = TRUE}
+poiss2 <- glm(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Sulphates,
+              data=train, 
+              family="poisson")
+summary(poiss2)
+plot(poiss2)
+```
+```{r}
+# Evaluate Model 1 with train data
+predY2train <- predict(poiss2, newdata=trainX)
+modelResultstrain2 <- data.frame(obs = trainY, pred=predY2train)
+colnames(modelResultstrain2) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain2 <- defaultSummary(modelResultstrain2)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain2
+
+
+# Evaluate Model 1 with train data
+predYtest2 <- predict(poiss2, newdata=testX)
+modelResultsTest2 <- data.frame(obs = testY, pred=predYtest2)
+colnames(modelResultsTest2) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest2 <- defaultSummary(modelResultsTest2)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest2
+```
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(poiss2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Poisson 2',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+### Comments on this model
+
+The residuals for this model is not homoscedastic and therefore we should probably change some pre processing steps to ensure residuals are more random. This is a trend that we see in the rest of the models below. This model appeared to perform better than Model 1 , which used all variables in the data set as predictors.
+
+The coefficients in this model support the analysis in model 1. Furthermore, some feature engineering may be important here to gain better insight into the `STARS` and `LabelAppeal` variables because we can see that there are some that contribute to the model a lot and some that do not.
+
+Model 3: Negative Binomial
+
+Although the second model above seemed to perform better than the first, it was not by much. Next we use the same methods employed above, but with a Negative Binomial model using `glm.nb()`from the `MASS` library. 
+
+Below is the outputs associated with the second model - which was a Poisson model some preprocessed variables included (identified above). The error was calculated using the `defaultSummary()` function in the `caret` package, and the variable importance was calculated using `varImp`  and plotted using `ggplot` for the first poisson model. Residual plots were not random (or with even spread), so the most important variables as listed below were used in a 2nd poisson model. **Code Appendix I**
+
+```{r, results = TRUE}
+negBin1 <- glm.nb(TARGET ~ .,
+              data=train)
+summary(negBin1)
+
+```
+
+```{r}
+# Evaluate Model 1 with train data
+predY3train <- predict(negBin1, newdata=trainX)
+modelResultsTrain3 <- data.frame(obs = trainY, pred=predY3train)
+colnames(modelResultsTrain3) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain3 <- defaultSummary(modelResultsTrain3)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain3
+
+# Evaluate Model 1 with train data
+predYtest3 <- predict(negBin1, newdata=testX)
+modelResultsTest3 <- data.frame(obs = testY, pred=predYtest3)
+colnames(modelResultsTest3) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest3 <- defaultSummary(modelResultsTest3)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest3
+```
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(negBin1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+### Comments on this model
+
+The residuals for this model is not homoscedastic whcih confirms that we should probably change some pre processing steps to ensure residuals are more random. This is a trend that we saw in previous poisson models and will see in the next model. Important variables were identified from the bar chart above with variable importance and used in the next model. This model appeared to perform better than Model 1 but not better than Model 2, which indicates that some variables should probably be omitted from the model. 
+
+The variable coefficients rank in a similar way as described in model 1 where variables such as `STARS` and `LabelAppeal` and `VolatileAcidity` have the most importance and variables such as `pH` and `FixedAcidity` are the least important.
+
+## Model 4: Negative Binomial (selected predictors)
+
+The same method used above was employed to create the final model. The variables we included in this model (based on the variable importance above) `LabelAppeal, AcidIndex, STARS, VolatileAcidity, Chlorides, FreeSulfurDioxide, TotalSulfurDioxide, Density, Sulphates, Alcohol`. **Code Appendix J**
+
+```{r, results = TRUE}
+negBin2 <- glm.nb(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Density + Sulphates + Alcohol, 
+              data=train)
+summary(negBin2)
+plot(negBin2)
+```
+
+```{r, results = TRUE}
+# Evaluate Model 1 with train data
+predY4train <- predict(negBin2, newdata=trainX)
+modelResultsTrain4 <- data.frame(obs = trainY, pred=predY4train)
+colnames(modelResultsTrain4) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain4 <- defaultSummary(modelResultsTrain4)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain4
+
+# Evaluate Model 1 with train data
+predYtest4 <- predict(negBin2, newdata=testX)
+modelResultsTest4 <- data.frame(obs = testY, pred=predYtest4)
+colnames(modelResultsTest4) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest4 <- defaultSummary(modelResultsTest4)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest4
+```
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(negBin2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+### Comments on this model
+
+The residuals for this model is not homoscedastic which indicates some pre processing steps should be employed to ensure residuals are more random. This is a trend that we stop seeing in the multiple linear regression model below. Important variables were identified from the bar char above with variable importance and used in the next model. This model appeared to perform better than Model 1 , which used all variables in the data set as predictors.
+
+# Model 5 - Multiple Linear Regression Model 
+
+The same method used above was employed to create the 5 model, a Multiple linear regression model using the `lm()` function. All variables were included for this model. **Code Appendix K**
+
+```{r, results = TRUE}
+linReg1<- lm(TARGET ~ ., 
+              data=train)
+summary(linReg1)
+plot(linReg1)
+```
+```{r}
+# Evaluate Model 1 with train data
+predY5train <- predict(linReg1, newdata=trainX)
+modelResultsTrain5 <- data.frame(obs = trainY, pred=predY5train)
+colnames(modelResultsTrain5) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain5 <- defaultSummary(modelResultsTrain5)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain5
+
+# Evaluate Model 1 with train data
+predYtest5 <- predict(linReg1, newdata=testX)
+modelResultsTest5 <- data.frame(obs = testY, pred=predYtest5)
+colnames(modelResultsTest5) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest5 <- defaultSummary(modelResultsTest5)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest5
+```
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+### Comments on this model
+
+The residuals for this model is more homoscedastic than the other models and seem to have a better fitting of the data based on R^2 and AIC scored. Important variables were identified from the bar chart above with variable importance and used in the next model. This model appeared to perform better than all other models thus far, which was surprising to me but may speak to the affect that preprocessing has on the model that will best fit the data.
+
+# Model 6 - Multiple Linear Regression Model (selected variables)
+
+Based on the model above, the next multiple linear regression model will consist of the following predictor variables: `LabelAppeal, AcidIndex, STARS, VolatileAcidity, Chlorides, FreeSulfurDioxide, TotalSulfurDioxide, Density, Sulphates, Alcohol`. **Code Appendix L**
+
+```{r, results = TRUE}
+linReg2<- lm(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Density + Sulphates + Alcohol, 
+              data=train)
+summary(linReg2)
+plot(linReg2)
+
+```
+
+```{r}
+# Evaluate Model 1 with train data
+predY6train <- predict(linReg2, newdata=trainX)
+modelResultsTrain6 <- data.frame(obs = trainY, pred=predY6train)
+colnames(modelResultsTrain6) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain6 <- defaultSummary(modelResultsTrain6)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain6
+
+# Evaluate Model 1 with train data
+predYtest6 <- predict(linReg2, newdata=testX)
+modelResultsTest6 <- data.frame(obs = testY, pred=predYtest6)
+colnames(modelResultsTest6) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquared and MAE by default
+modelEvalTest6 <- defaultSummary(modelResultsTest6)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest6
+```
+
+```{r, results = TRUE}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+### Comments on this model
+
+The residuals for this model is more homoscedastic than the other models and seem to have a better fitting of the data based on R^2 and AIC scored. This model appeared to perform better than all other models thus far, which was surprising to me. On final model was explored that included only three important variables as identified in the bar chart above.
+
+#Model 7 - Linear Regression 3 vars
+
+The final model was created based on the success of the last two linear models and only includs `STARS` and `LabelAppeal` and `VolitileAcidity`. **Code Appendix M**
+
+```{r, results = TRUE}
+linReg3<- lm(TARGET ~ LabelAppeal + STARS + VolatileAcidity, 
+              data=train)
+summary(linReg3)
+plot(linReg3)
+```
+
+```{r}
+# Evaluate Model 1 with train data
+predY7train <- predict(linReg3, newdata=trainX)
+modelResultsTrain7 <- data.frame(obs = trainY, pred=predY7train)
+colnames(modelResultsTrain7) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain7 <- defaultSummary(modelResultsTrain7)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain7
+
+# Evaluate Model 1 with train data
+predYtest7 <- predict(linReg3, newdata=testX)
+modelResultsTest7 <- data.frame(obs = testY, pred=predYtest7)
+colnames(modelResultsTest7) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquared and MAE by default
+modelEvalTest7 <- defaultSummary(modelResultsTest7)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest7
+```
+
+```{r}
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg3) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+
+```
+
+### Comments on this model
+
+The residuals for this model is more homoscedastic than the other models and seem to have a better fitting of the data based on R^2 and AIC scored. This model appeared to perform better than all other models except for the last model which may indicate that we need more predictors in our final model than was included here.
+
+# Select Models
+
+Below is a data frame with the RMSE, R^2 and MAE values based on test data for each model created. In addition, AICs for each model was calculated using the `AIC()` function in the `stats` library.**Code Appendix N**
+
+```{r, results = TRUE}
+ErrorsDF <- data.frame(matrix(ncol = 5, nrow = 4))
+ErrorsDF["Metric"] <- c("RMSE", "R^2", "MAE", "AIC")
+ErrorsDF["Model1_Poisson"]<- rbind(as.data.frame(modelEvalTest1),"AIC" = as.data.frame(AIC(poiss1))[[1]])
+ErrorsDF["Model2_Poisson"]<- rbind(as.data.frame(modelEvalTest2),"AIC" = as.data.frame(AIC(poiss2))[[1]])
+ErrorsDF["Model3_NegBinom"]<- rbind(as.data.frame(modelEvalTest3),"AIC" = as.data.frame(AIC(negBin1))[[1]])
+ErrorsDF["Model4_NegBinom"]<- rbind(as.data.frame(modelEvalTest4),"AIC" = as.data.frame(AIC(negBin2))[[1]])
+ErrorsDF["Model5_LinearRegression"]<- rbind(as.data.frame(modelEvalTest5),"AIC" = as.data.frame(AIC(linReg1))[[1]])
+ErrorsDF["Model6_LinearRegression"]<- rbind(as.data.frame(modelEvalTest6),"AIC" = as.data.frame(AIC(linReg2))[[1]])
+ErrorsDF["Model7_LinearRegression"]<- rbind(as.data.frame(modelEvalTest7),"AIC" = as.data.frame(AIC(linReg3))[[1]])
+#ErrorsDF["AIC"] <-  as.data.frame(c(AIC(poiss1),AIC(poiss2), AIC(negBin1), AIC(negBin2))
+ErrorsDF <- ErrorsDF %>% dplyr::select(Metric, Model1_Poisson, Model2_Poisson, Model3_NegBinom, Model4_NegBinom, Model5_LinearRegression, Model6_LinearRegression, Model7_LinearRegression)
+ErrorsDF
+
+```
+
+Based on the information above, the best models based on the AIC & MAE values, is Model 6 - Linear Regression Model with only important variables as indicated by the initial linear regression model important variables. We can see that model 6 accounts for approximately 55.56% of the variability in the data as described by the R^2 metric, and has the lowest AIC and MAE scores. This indicated that this model fits the data the best.
+
+The residuals for this model show that they are not homoescedastic which indicates that further pre processing of variables might yield a more effective model. However the residuals plots above were much better than those of the models done before (especially the poisson and negative binomial). If I had more time I would center and scale categorical variables to see if the residuals and R^2 changes to capture more of the variability. 
+
+Predictions were made using the second negative binmial model for the evaluation data set because it was the count regression model that had the lowest AIC score. The same preprocessing steps were applied to the evaluation data set. 
+
+```{r}
+# separate variables from target
+evalX <- rawTest
+
+catsV <- rawTest %>%
+  dplyr::select(STARS, AcidIndex, LabelAppeal)
+
+#centering and scaling
+prepTrainModel <- preProcess(evalX, method = c("center", "scale"))
+
+
+#make predictions for new centered/scaled numbers
+evalX <- predict(prepTrainModel, evalX)
+evalX["STARS"] <- as.factor(catsV$STARS)
+evalX["AcidIndex"] <- as.factor(catsV$AcidIndex)
+evalX["LabelAppeal"] <- as.factor(catsV$LabelAppeal)
+
+
+#impute them using knn
+#create model for imputing 
+prepTrainModel <- preProcess(evalX, method = c("knnImpute"))
+
+#make predictions for NA values
+evalX <- predict(prepTrainModel, evalX)
+
+# Evaluate Model 1 with train data
+pred<- predict(linReg2, newdata=evalX)
+
+write.csv(pred, file = "wine_evaluated_data.csv",row.names=FALSE)
+```
+
+# Next steps
+
+If I had more time I would explore different preprocessings steps and its affect on the model. For example, I would center and scale even the categorical variables to see if that would change the outcome of our models. I also wonder if applying a log transformation to some of the variables would be benifitial as well especially in the case of the poisson and negative binomial models. I would like to also explore cross validation steps or feature engineering where we abstract the variables instead. It seems that some of the variables that was created by the model in the `STARS` category had components that were more predictive than others. This may mean that feature engineering is the way to go.
+
+# Code Appendix
+
+## A. Libraries Used
+
+```{r, echo = TRUE}
+# Libraries
+library(caret)
+library(tidyverse)
+library(ggplot2)
+library(MASS)
+library(psych)
+library(MASS)
+library(GGally)
+```
+
+## B. Importing the Data Set & Inspecting Data Sets
+
+```{r, echo = TRUE, results = TRUE}
+# Load data
+# Training
+rawTrain <- read.csv("https://raw.githubusercontent.com/MsQCompSci/Data621Group4/main/HW5/wine-training-data.csv", header = TRUE, stringsAsFactors = FALSE) %>% dplyr::select(-"INDEX")
+
+#Testing data
+rawTest <- read.csv("https://raw.githubusercontent.com/MsQCompSci/Data621Group4/main/HW5/wine-evaluation-data.csv", header = TRUE, stringsAsFactors = FALSE) %>% dplyr::select(-"IN", -"TARGET")
+
+# Inspect of training data
+glimpse(rawTrain)
+```
+
+```{r, echo = TRUE, results = TRUE}
+#summary statistics
+summary(rawTrain)
+
+# Histogram dataframe
+tallDF <- rawTrain %>% 
+  gather(key = 'variable', value = 'value')
+# Histogram plots of each variable
+ggplot(tallDF) + 
+  geom_histogram(aes(x=value, y = ..density..), bins=30) + 
+  geom_density(aes(x=value), color='blue') +
+  facet_wrap(. ~variable, scales='free', ncol=4)
+#put dataframe into long format
+catLONG <- rawTrain %>% 
+  dplyr::select(TARGET, STARS, LabelAppeal, AcidIndex) %>%
+  pivot_longer(cols = -TARGET, names_to="variable", values_to="value") %>%
+  arrange(variable, value)
+
+#plot
+catLONG %>% 
+  ggplot(mapping = aes(x = factor(value), y = TARGET)) +
+    geom_boxplot() + 
+    facet_wrap(.~variable, scales="free") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+## C. Identifying Class
+
+```{r, echo = TRUE, results = TRUE}
+#take a look at the variable class (catgorical or numeric)
+lapply(rawTrain, class)
+```
+
+### D. Compare to Target Variable
+
+```{r, echo = TRUE, results = TRUE}
+#put dataframe into long format
+catLONG <- rawTrain %>% 
+  dplyr::select(TARGET, STARS, LabelAppeal, AcidIndex) %>%
+  pivot_longer(cols = -TARGET, names_to="variable", values_to="value") %>%
+  arrange(variable, value)
+
+#plot
+catLONG %>% 
+  ggplot(mapping = aes(x = factor(value), y = TARGET)) +
+    geom_boxplot() + 
+    facet_wrap(.~variable, scales="free") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+
+#continuous data
+contDF <- rawTrain%>%
+  dplyr::select(-STARS, -LabelAppeal, -AcidIndex)
+
+#generate scatter plots using caret
+featurePlot(contDF[,2:ncol(contDF)], contDF[,1], pch = 20)
+```
+
+## E. Missing Values
+
+```{r, echo = TRUE, results = TRUE}
+# Identify missing data by Feature and display percent
+missing <- colSums(rawTrain %>% sapply(is.na))
+missing_pct <- round(missing / nrow(rawTrain) * 100, 2)
+stack(sort(missing_pct, decreasing = TRUE))
+```
+
+```{r, echo = TRUE, results = TRUE}
+#create list with new column names based on original column
+for(i in 1:length(rawTrain[['STARS']])){
+  if(is.na(rawTrain[['STARS']][i])){
+    rawTrain[['STARS']][i]<-'0'
+  }
+}
+
+#needs to be numeric
+rawTrain$STARS <- as.numeric(rawTrain$STARS)
+
+# separate variables from target
+trainX <- rawTrain %>% dplyr::select(-TARGET)
+trainY <- rawTrain$TARGET
+
+catsV <- rawTrain %>%
+  dplyr::select(STARS, AcidIndex, LabelAppeal)
+
+#normalize numerical variables
+#create model for normalizing
+prepTrainModel <- preProcess(trainX, method = c("center","scale"))
+
+#make predictions for new centered/scaled numbers not categorical variables
+trainX <- predict(prepTrainModel, trainX)
+trainX["STARS"] <- as.factor(catsV$STARS)
+trainX["AcidIndex"] <- as.factor(catsV$AcidIndex)
+trainX["LabelAppeal"] <- as.factor(catsV$LabelAppeal)
+
+#impute them using knn
+#create model for imputing 
+prepTrainModel <- preProcess(trainX, method = c("knnImpute"))
+#make predictions for NA values
+trainX <- predict(prepTrainModel, trainX)
+
+# Identify missing data by Feature and display percent - new
+missing <- colSums(trainX %>% sapply(is.na))
+missing_pct <- round(missing / nrow(rawTrain) * 100, 2)
+stack(sort(missing_pct, decreasing = TRUE))
+```
+
+```{r, results=TRUE, echo = TRUE}
+# Histogram dataframe - new
+tallDF <- trainX %>% 
+  dplyr::select(-STARS,-AcidIndex, -LabelAppeal)%>%
+  gather(key = 'variable', value = 'value')
+
+# Histogram plots of each variable (new)
+ggplot(tallDF) + 
+  geom_histogram(aes(x=value, y = ..density..), bins=30) + 
+  geom_density(aes(x=value), color='blue') +
+  facet_wrap(. ~variable, scales='free', ncol=4)
+```
+
+## F. Correlation
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+# Let's use a heat map to see the level of correlation of the numeric predictor variables.
+#correlation matrix for predictors
+ggcorr(trainX)
+```
+
+
+## G. Model Creation - Poisson One
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+# set the seed to make your partition reproducible
+set.seed(369)
+
+#get 80 percent of random indexes and separate
+trainIndex <- createDataPartition(trainY, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+#put x and y in same dataframe again
+train <- trainX
+train["TARGET"] <- trainY
+
+#separate
+train <- train[trainIndex, ]
+test <- train[-trainIndex, ]
+#Model One
+poiss1 <- glm(TARGET ~ .,
+              data=train,
+              family="poisson")
+#get summary of model
+summary(poiss1)
+
+#for residuals
+plot(poiss1)
+
+#separate variables and target
+trainX <- train %>% dplyr::select(-TARGET)
+trainY <- train %>% dplyr::select(TARGET)
+
+# Evaluate Model 1 with train data
+predY1train <- predict(poiss1, newdata=trainX)
+modelResultstrain1 <- data.frame(obs = trainY, pred=predY1train)
+colnames(modelResultstrain1) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain1 <- defaultSummary(modelResultstrain1)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain1
+
+#evaluate model 1 using test data
+testX <- test %>% dplyr::select(-TARGET)
+testY <- test %>% dplyr::select(TARGET)
+
+# Evaluate Model 1 with train data
+predYtest1 <- predict(poiss1, newdata=testX)
+modelResultsTest1 <- data.frame(obs = testY, pred=predYtest1)
+colnames(modelResultsTest1) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest1 <- defaultSummary(modelResultsTest1)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest1
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(poiss1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+## H. Model Creation - Poisson 2
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+poiss2 <- glm(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Density + Sulphates + Alcohol + ResidualSugar,
+              data=train, 
+              family="poisson")
+summary(poiss2)
+plot(poiss2)
+
+# Evaluate Model 1 with train data
+predY2train <- predict(poiss2, newdata=trainX)
+modelResultstrain2 <- data.frame(obs = trainY, pred=predY2train)
+colnames(modelResultstrain2) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain2 <- defaultSummary(modelResultstrain2)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain2
+
+
+# Evaluate Model 1 with train data
+predYtest2 <- predict(poiss2, newdata=testX)
+modelResultsTest2 <- data.frame(obs = testY, pred=predYtest2)
+colnames(modelResultsTest2) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest2 <- defaultSummary(modelResultsTest2)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest2
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(poiss2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+## I. Model Creation - Negative Binomial 1
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+negBin1 <- glm.nb(TARGET ~ .,
+              data=train)
+summary(negBin1)
+plot(negBin1)
+
+# Evaluate Model 1 with train data
+predY3train <- predict(negBin1, newdata=trainX)
+modelResultsTrain3 <- data.frame(obs = trainY, pred=predY3train)
+colnames(modelResultsTrain3) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain3 <- defaultSummary(modelResultsTrain3)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain3
+
+# Evaluate Model 1 with train data
+predYtest3 <- predict(negBin1, newdata=testX)
+modelResultsTest3 <- data.frame(obs = testY, pred=predYtest3)
+colnames(modelResultsTest3) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest3 <- defaultSummary(modelResultsTest3)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest3
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(negBin1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+## J. Model Creation - Negative Binomial 2
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+negBin2 <- glm.nb(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Density + Sulphates + Alcohol, 
+              data=train)
+summary(negBin2)
+plot(negBin2)
+
+# Evaluate Model 1 with train data
+predY4train <- predict(negBin2, newdata=trainX)
+modelResultsTrain4 <- data.frame(obs = trainY, pred=predY4train)
+colnames(modelResultsTrain4) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain4 <- defaultSummary(modelResultsTrain4)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain4
+
+# Evaluate Model 1 with train data
+predYtest4 <- predict(negBin2, newdata=testX)
+modelResultsTest4 <- data.frame(obs = testY, pred=predYtest4)
+colnames(modelResultsTest4) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest4 <- defaultSummary(modelResultsTest4)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest4
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(negBin2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+## K. Model Creation - Multiple Linear Regression
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+linReg1<- lm(TARGET ~ ., 
+              data=train)
+summary(linReg1)
+plot(linReg1)
+
+# Evaluate Model 1 with train data
+predY5train <- predict(linReg1, newdata=trainX)
+modelResultsTrain5 <- data.frame(obs = trainY, pred=predY5train)
+colnames(modelResultsTrain5) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain5 <- defaultSummary(modelResultsTrain5)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain5
+
+# Evaluate Model 1 with train data
+predYtest5 <- predict(linReg1, newdata=testX)
+modelResultsTest5 <- data.frame(obs = testY, pred=predYtest5)
+colnames(modelResultsTest5) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTest5 <- defaultSummary(modelResultsTest5)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest5
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg1) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+
+## L. Model Creation - Multiple Linear Regression
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+linReg2<- lm(TARGET ~ LabelAppeal + AcidIndex
+              + STARS + VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + 
+                Density + Sulphates + Alcohol, 
+              data=train)
+summary(linReg2)
+plot(linReg2)
+
+# Evaluate Model 1 with train data
+predY6train <- predict(linReg2, newdata=trainX)
+modelResultsTrain6 <- data.frame(obs = trainY, pred=predY6train)
+colnames(modelResultsTrain6) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain6 <- defaultSummary(modelResultsTrain6)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain6
+
+# Evaluate Model 1 with train data
+predYtest6 <- predict(linReg2, newdata=testX)
+modelResultsTest6 <- data.frame(obs = testY, pred=predYtest6)
+colnames(modelResultsTest6) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquared and MAE by default
+modelEvalTest6 <- defaultSummary(modelResultsTest6)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest6
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg2) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+# M. Model Creation - Multiple Linear Regression (3 vars)
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+#train model
+linReg3<- lm(TARGET ~ LabelAppeal + STARS + VolatileAcidity, 
+              data=train)
+summary(linReg3)
+plot(linReg3)
+# Evaluate Model 1 with train data
+predY7train <- predict(linReg3, newdata=trainX)
+modelResultsTrain7 <- data.frame(obs = trainY, pred=predY7train)
+colnames(modelResultsTrain7) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquaredand MAE by default
+modelEvalTrain7 <- defaultSummary(modelResultsTrain7)
+
+#display RMSE, Rsuared and MAE
+modelEvalTrain7
+
+# Evaluate Model 1 with train data
+predYtest7 <- predict(linReg3, newdata=testX)
+modelResultsTest7 <- data.frame(obs = testY, pred=predYtest7)
+colnames(modelResultsTest7) = c('obs', 'pred')
+  
+# This grabs RMSE, Rsquared and MAE by default
+modelEvalTest7 <- defaultSummary(modelResultsTest7)
+
+#display RMSE, Rsuared and MAE
+modelEvalTest7
+
+#show variable importance to help iterate on next model
+#using caret and gglot 
+varImp(linReg3) %>% as.data.frame() %>% 
+    ggplot(aes(x = reorder(rownames(.), desc(Overall)), y = Overall)) +
+    geom_col(aes(fill = Overall)) +
+    theme(panel.background = element_blank(),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient() +
+    labs(title = 'Variable Importance Plot - Negative Binomial 1',
+         x = "Parameter",
+         y = "Relative Importance")
+```
+
+## N. Model Selection
+
+```{r, results = TRUE, fig.width = 7, fig.height = 4, echo = TRUE }
+ErrorsDF <- data.frame(matrix(ncol = 5, nrow = 4))
+ErrorsDF["Metric"] <- c("RMSE", "R^2", "MAE", "AIC")
+ErrorsDF["Model1_Poisson"]<- rbind(as.data.frame(modelEvalTest1),"AIC" = as.data.frame(AIC(poiss1))[[1]])
+ErrorsDF["Model2_Poisson"]<- rbind(as.data.frame(modelEvalTest2),"AIC" = as.data.frame(AIC(poiss2))[[1]])
+ErrorsDF["Model3_NegBinom"]<- rbind(as.data.frame(modelEvalTest3),"AIC" = as.data.frame(AIC(negBin1))[[1]])
+ErrorsDF["Model4_NegBinom"]<- rbind(as.data.frame(modelEvalTest4),"AIC" = as.data.frame(AIC(negBin2))[[1]])
+ErrorsDF["Model5_LinearRegression"]<- rbind(as.data.frame(modelEvalTest5),"AIC" = as.data.frame(AIC(linReg1))[[1]])
+ErrorsDF["Model6_LinearRegression"]<- rbind(as.data.frame(modelEvalTest6),"AIC" = as.data.frame(AIC(linReg2))[[1]])
+ErrorsDF["Model7_LinearRegression"]<- rbind(as.data.frame(modelEvalTest7),"AIC" = as.data.frame(AIC(linReg3))[[1]])
+#ErrorsDF["AIC"] <-  as.data.frame(c(AIC(poiss1),AIC(poiss2), AIC(negBin1), AIC(negBin2))
+ErrorsDF <- ErrorsDF %>% dplyr::select(Metric, Model1_Poisson, Model2_Poisson, Model3_NegBinom, Model4_NegBinom, Model5_LinearRegression, Model6_LinearRegression, Model7_LinearRegression)
+ErrorsDF
+
+#plot residuals
+plot(linReg3)
+
+####MAKE PREDICTIONS AND WRITE TO CSV
+# separate variables from target
+evalX <- rawTest
+
+catsV <- rawTest %>%
+  dplyr::select(STARS, AcidIndex, LabelAppeal)
+
+#centering and scaling
+prepTrainModel <- preProcess(evalX, method = c("center", "scale"))
+
+
+#make predictions for new centered/scaled numbers
+evalX <- predict(prepTrainModel, evalX)
+evalX["STARS"] <- as.factor(catsV$STARS)
+evalX["AcidIndex"] <- as.factor(catsV$AcidIndex)
+evalX["LabelAppeal"] <- as.factor(catsV$LabelAppeal)
+
+
+#impute them using knn
+#create model for imputing 
+prepTrainModel <- preProcess(evalX, method = c("knnImpute"))
+
+#make predictions for NA values
+evalX <- predict(prepTrainModel, evalX)
+
+# Evaluate Model 1 with train data
+pred<- predict(linReg2, newdata=evalX)
+
+write.csv(pred, file = "wine_evaluated_data.csv",row.names=FALSE)
+```
+
